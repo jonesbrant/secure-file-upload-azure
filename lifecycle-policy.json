@@ -1,0 +1,36 @@
+{
+  "rules": [
+    {
+      "enabled": true,
+      "name": "purge-quarantine",
+      "type": "Lifecycle",
+      "definition": {
+        "filters": {
+          "blobTypes": ["blockBlob"],
+          "prefixMatch": ["quarantine"]
+        },
+        "actions": {
+          "baseBlob": {
+            "delete": { "daysAfterCreationGreaterThan": 7 }
+          }
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "name": "purge-infected-and-status",
+      "type": "Lifecycle",
+      "definition": {
+        "filters": {
+          "blobTypes": ["blockBlob"],
+          "prefixMatch": ["infected", "status"]
+        },
+        "actions": {
+          "baseBlob": {
+            "delete": { "daysAfterCreationGreaterThan": 30 }
+          }
+        }
+      }
+    }
+  ]
+}

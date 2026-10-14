@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Secure File Intake</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <main class="card">
+    <h1>Secure File Intake</h1>
+    <p class="sub">Files are uploaded to a quarantine area, scanned in an isolated container with ClamAV, and released
+      to the department archive only if no threats are found.</p>
+
+    <label for="department">Department</label>
+    <select id="department">
+      <option value="" disabled selected>Select a department…</option>
+      <option value="sheriff">Sheriff</option>
+      <option value="public-health">Public Health</option>
+      <option value="corrections">Corrections</option>
+    </select>
+
+    <label for="file">File</label>
+    <input type="file" id="file" />
+
+    <button id="upload" disabled>Upload &amp; Scan</button>
+
+    <div id="progressWrap" class="hidden">
+      <div class="bar"><div id="bar"></div></div>
+      <div class="row"><span id="pct">0%</span><span id="rate"></span></div>
+    </div>
+
+    <div id="status" class="status hidden"></div>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+
+</html>
