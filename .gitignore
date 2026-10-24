@@ -5,3 +5,8 @@ node_modules/
 local.settings.json
 eicar.txt
 .azure/
+__pycache__/
+*.pyc
+artifacts/
+*.wav
+*.mp4

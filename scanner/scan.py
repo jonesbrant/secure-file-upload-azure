@@ -12,11 +12,14 @@ storage account permits neither shared keys nor public network access.
 """
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 
 from azure.identity import DefaultAzureCredential
@@ -77,6 +80,8 @@ def clamscan(path):
             f"--max-filesize={MAX_SCAN_BYTES}",
             f"--max-scansize={MAX_SCAN_BYTES}",
             "--max-recursion=16",
+            "--alert-exceeds-max=yes",
+            "--alert-encrypted=yes",
             path,
         ],
         capture_output=True,
@@ -125,6 +130,13 @@ def process(upload_id):
     properties = source.get_blob_properties()
     size = properties.size
     content_type = properties.content_settings.content_type
+    if not record.get("programId") or not record.get("expiresUtc"):
+        write_record(record, "error", "Legacy submission requires manual disposition.")
+        return
+    if datetime.fromisoformat(record["expiresUtc"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+        source.delete_blob()
+        write_record(record, "expired", "Retention expired before intake scanning.")
+        return
 
     if size > MAX_SCAN_BYTES:
         write_record(
@@ -137,7 +149,7 @@ def process(upload_id):
 
     write_record(record, "scanning", "Scanning in an isolated container with ClamAV.")
 
-    workdir = tempfile.mkdtemp(prefix="scan-", dir="/tmp")
+    workdir = tempfile.mkdtemp(prefix="scan-")
     local_path = os.path.join(workdir, "payload.bin")
     try:
         log(f"downloading {blob_name} ({size} bytes)")
@@ -148,16 +160,15 @@ def process(upload_id):
 
         if is_clean:
             destination = DEPARTMENT_CONTAINERS[department]
-            promote(local_path, destination, blob_name, content_type)
-            source.delete_blob()
             write_record(
                 record,
-                "clean",
-                "No threats found. Stored in the "
-                f"{record.get('departmentName', department)} container "
-                f"as {blob_name}.",
+                "awaiting_defender",
+                "ClamAV intake scan passed. Waiting for Microsoft Defender at-rest scanning.",
+                clamavResult="No threats found",
                 storedContainer=destination,
             )
+            promote(local_path, destination, blob_name, content_type)
+            source.delete_blob()
         else:
             promote(local_path, INFECTED_CONTAINER, blob_name, content_type)
             source.delete_blob()
@@ -179,15 +190,52 @@ def main():
         return 0
 
     log(f"processing upload {UPLOAD_ID}")
+    lock_name = "locks/" + hashlib.sha256(f"upload:{UPLOAD_ID}".encode()).hexdigest()
+    lock_blob = blob_service.get_blob_client("auth", lock_name)
+    lease = None
+    stop = threading.Event()
     try:
+        try:
+            lock_blob.upload_blob(b"", overwrite=False)
+        except Exception as err:
+            if getattr(err, "status_code", None) != 409:
+                raise
+        for attempt in range(30):
+            try:
+                lease = lock_blob.acquire_lease(lease_duration=60)
+                break
+            except Exception as err:
+                if getattr(err, "status_code", None) != 409 or attempt == 29:
+                    raise
+                time.sleep(2)
+
+        def renew():
+            while not stop.wait(20):
+                try:
+                    lease.renew()
+                except Exception:
+                    # Do not release a file if distributed coordination is lost.
+                    os._exit(1)
+
+        thread = threading.Thread(target=renew, daemon=True)
+        thread.start()
+        record = read_record(UPLOAD_ID)
+        if record["state"] not in ("queued", "scanning"):
+            log("Already processed or closed; skipping duplicate execution.")
+            return 0
         process(UPLOAD_ID)
     except Exception as err:  # noqa: BLE001 - surface the failure to the user
         log(f"scan failed: {err}")
-        try:
-            write_record(read_record(UPLOAD_ID), "error", f"Scan failed: {err}")
-        except Exception as inner:  # noqa: BLE001
-            log(f"could not record failure: {inner}")
+        if lease:
+            try:
+                write_record(read_record(UPLOAD_ID), "error", f"Scan failed: {err}")
+            except Exception as inner:  # noqa: BLE001
+                log(f"could not record failure: {inner}")
         return 1
+    finally:
+        stop.set()
+        if lease:
+            lease.release()
 
     log("run complete")
     return 0

@@ -1,165 +1,226 @@
-/* Client-side chunked upload.
+"use strict";
 
-   The file is sliced into fixed-size blocks that are PUT individually to the
-   upload broker, which stages each one as a block in Azure Blob Storage. The
-   browser never holds more than a few blocks in memory, so arbitrarily large
-   files upload with flat memory use, and any failed block is retried on its
-   own instead of restarting the whole transfer. */
-
-const BLOCK_SIZE = 8 * 1024 * 1024; // 8 MiB -> 50,000 blocks = ~400 GB ceiling
-const PARALLEL = 4;
-const MAX_ATTEMPTS = 4;
-const MAX_BLOCKS = 50000;
-
-const API = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || "";
-
-const el = {
-  dept: document.getElementById("department"),
-  file: document.getElementById("file"),
-  upload: document.getElementById("upload"),
-  progressWrap: document.getElementById("progressWrap"),
-  bar: document.getElementById("bar"),
-  pct: document.getElementById("pct"),
-  rate: document.getElementById("rate"),
-  status: document.getElementById("status")
+const API = window.APP_CONFIG?.apiBase || "";
+const BLOCK_SIZE = 8 * 1024 * 1024;
+const $ = id => document.getElementById(id);
+let token = "", me, catalog, adminConfig = [], busy = false;
+const show = (id, visible) => $(id).classList.toggle("hidden", !visible);
+const say = (text, kind = "") => {
+  $("status").className = `status ${kind}`;
+  $("status").textContent = text;
 };
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const emails = text => text.split(/[\n,;]/).map(x => x.trim().toLowerCase()).filter(Boolean);
+const bytes = n => n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1024 ** 2).toFixed(1)} MiB`;
 
-function refreshButton() {
-  el.upload.disabled = !(el.dept.value && el.file.files.length);
-}
-el.dept.addEventListener("change", refreshButton);
-el.file.addEventListener("change", refreshButton);
-
-function say(message, kind) {
-  el.status.classList.remove("hidden");
-  el.status.className = "status" + (kind ? " " + kind : "");
-  el.status.textContent = message;
-}
-
-function humanBytes(n) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return n.toFixed(i === 0 ? 0 : 1) + " " + units[i];
-}
-
-async function postJson(path, body) {
-  const res = await fetch(API + path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+async function request(path, method = "GET", body) {
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(API + path, {
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store"
   });
-  if (!res.ok) throw new Error(`${path} failed (${res.status}): ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
-}
-
-async function putBlock(uploadId, index, chunk) {
-  const url = `${API}/api/upload/block?id=${encodeURIComponent(uploadId)}&index=${index}`;
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: chunk
-      });
-      if (res.ok) return;
-      throw new Error(`block ${index} returned ${res.status}`);
-    } catch (err) {
-      if (attempt >= MAX_ATTEMPTS) throw err;
-      await new Promise(r => setTimeout(r, 500 * 2 ** (attempt - 1)));
-    }
+  if (!response.ok) {
+    if (response.status === 401 && token) signOut();
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result.error || `Request failed (${response.status}).`);
   }
+  return response.status === 204 ? null : response.json();
 }
-
-async function uploadChunked(uploadId, file) {
-  const total = Math.max(1, Math.ceil(file.size / BLOCK_SIZE));
-  if (total > MAX_BLOCKS) {
-    throw new Error("File is too large for the configured block size.");
-  }
-
-  let uploadedBytes = 0;
-  let next = 0;
-  const started = Date.now();
-
-  const worker = async () => {
-    while (true) {
-      const i = next++;
-      if (i >= total) return;
-      const start = i * BLOCK_SIZE;
-      const chunk = file.slice(start, Math.min(start + BLOCK_SIZE, file.size));
-      await putBlock(uploadId, i, chunk);
-
-      uploadedBytes += chunk.size;
-      const pct = file.size ? Math.round(uploadedBytes / file.size * 100) : 100;
-      el.bar.style.width = pct + "%";
-      el.pct.textContent = `${pct}%  (${humanBytes(uploadedBytes)} / ${humanBytes(file.size)})`;
-      const secs = (Date.now() - started) / 1000;
-      if (secs > 0) el.rate.textContent = humanBytes(uploadedBytes / secs) + "/s";
-    }
+function guarded(action) {
+  return async event => {
+    event?.preventDefault();
+    try { await action(event); } catch (error) { say(error.message, "bad"); }
   };
-
-  await Promise.all(Array.from({ length: Math.min(PARALLEL, total) }, worker));
-  return total;
 }
-
-async function pollStatus(uploadId) {
-  const terminal = { clean: "ok", infected: "bad", error: "bad" };
-  const deadline = Date.now() + 30 * 60 * 1000;
-
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000));
-
-    let state;
-    try {
-      const res = await fetch(`${API}/api/status?id=${encodeURIComponent(uploadId)}`);
-      if (!res.ok) continue;
-      state = await res.json();
-    } catch { continue; }
-
-    if (state.state in terminal) {
-      say(state.message || state.state, terminal[state.state]);
-      return;
-    }
-    say(state.message || "Scanning…");
-  }
-  say("Still scanning. The scan job runs asynchronously — check back shortly.", "warn");
+function options(id, values, placeholder) {
+  $(id).replaceChildren();
+  if (placeholder) $(id).append(new Option(placeholder, ""));
+  for (const item of values) $(id).append(new Option(item.name, item.id));
 }
-
-el.upload.addEventListener("click", async () => {
-  const file = el.file.files[0];
-  const department = el.dept.value;
-  if (!file || !department) return;
-
-  el.upload.disabled = true;
-  el.dept.disabled = true;
-  el.file.disabled = true;
-  el.progressWrap.classList.remove("hidden");
-  el.bar.style.width = "0%";
-
+function refreshButton() {
+  $("upload").disabled = busy || !$("program").value || !$("file").files.length;
+}
+function updatePrograms() {
+  const department = catalog.departments.find(d => d.id === $("department").value);
+  options("program", department?.programs || [], "Select a program");
+  $("retention").textContent = department && !department.programs.length ?
+    "This department has no active programs. Contact the department administrator." : "";
+  refreshButton();
+}
+function updateRetention() {
+  const program = catalog.departments.find(d => d.id === $("department").value)?.programs.find(p => p.id === $("program").value);
+  $("retention").textContent = program ? `Deleted after retrieval or ${program.retentionDays} day(s), whichever comes first.` : "";
+  refreshButton();
+}
+function signOut() {
+  token = "";
+  show("portal", false); show("login", true); show("verifyForm", false);
+  $("code").value = ""; $("file").value = "";
+  $("reference").value = ""; $("details").value = "";
+  $("submissions").replaceChildren();
+}
+$("requestForm").addEventListener("submit", guarded(async () => {
+  $("requestCode").disabled = true;
   try {
-    say("Preparing upload…");
-    const { uploadId } = await postJson("/api/upload/init", {
-      department,
-      fileName: file.name,
-      size: file.size
-    });
+    const result = await request("/api/auth/request", "POST", { email: $("email").value });
+    show("verifyForm", true); say(result.message); $("code").focus();
+  } finally { $("requestCode").disabled = false; }
+}));
+$("verifyForm").addEventListener("submit", guarded(async () => {
+  const result = await request("/api/auth/verify", "POST", { email: $("email").value, code: $("code").value });
+  token = result.token; // Kept only in memory; refresh or closing the page signs out.
+  me = await request("/api/me");
+  catalog = await request("/api/catalog");
+  options("department", catalog.departments, "Select a department");
+  updatePrograms();
+  $("signedIn").textContent = me.email;
+  show("login", false); show("portal", true);
+  show("staffTab", me.staffDepartments.length > 0);
+  show("adminView", me.adminDepartments.length > 0);
+  show("delegateForm", me.superAdmin);
+  show("publicView", true); show("staffView", false);
+  if (me.adminDepartments.length) await loadAdmin();
+  say("Signed in. Choose a department and program to submit a file.", "ok");
+}));
+$("logout").addEventListener("click", guarded(async () => {
+  try { await request("/api/auth/logout", "POST"); } finally { signOut(); say("Signed out."); }
+}));
+$("department").addEventListener("change", updatePrograms);
+$("program").addEventListener("change", updateRetention);
+$("file").addEventListener("change", refreshButton);
+$("publicTab").addEventListener("click", () => { show("publicView", true); show("staffView", false); });
+$("staffTab").addEventListener("click", guarded(async () => {
+  show("publicView", false); show("staffView", true); await loadSubmissions();
+}));
+$("refresh").addEventListener("click", guarded(loadSubmissions));
 
-    say(`Uploading ${humanBytes(file.size)} in ${humanBytes(BLOCK_SIZE)} blocks…`);
-    const blockCount = await uploadChunked(uploadId, file);
+async function loadAdmin() {
+  adminConfig = (await request("/api/admin/config")).departments;
+  options("adminDepartment", catalog.departments.filter(d => me.adminDepartments.includes(d.id)));
+  updateAdminPrograms();
+}
+function updateAdminPrograms() {
+  const cfg = adminConfig.find(d => d.department === $("adminDepartment").value);
+  options("editProgram", cfg?.programs || [], "Create a new program");
+  $("departmentAdmins").value = (cfg?.admins || []).join("\n");
+  editProgram();
+}
+function editProgram() {
+  const item = adminConfig.find(d => d.department === $("adminDepartment").value)?.programs.find(p => p.id === $("editProgram").value);
+  $("programName").value = item?.name || "";
+  $("retentionDays").value = item?.retentionDays || 7;
+  $("recipients").value = (item?.recipients || []).join("\n");
+  $("active").checked = item?.active !== false;
+}
+$("adminDepartment").addEventListener("change", updateAdminPrograms);
+$("editProgram").addEventListener("change", editProgram);
+$("programForm").addEventListener("submit", guarded(async () => {
+  const department = $("adminDepartment").value;
+  await request("/api/admin/programs", "PUT", {
+    id: $("editProgram").value || undefined, department, name: $("programName").value,
+    retentionDays: Number($("retentionDays").value), recipients: emails($("recipients").value), active: $("active").checked
+  });
+  catalog = await request("/api/catalog");
+  await loadAdmin(); $("adminDepartment").value = department; updateAdminPrograms(); updatePrograms();
+  say("Program saved. Its recipients can retrieve submissions after both malware scans pass.", "ok");
+}));
+$("delegateForm").addEventListener("submit", guarded(async () => {
+  const department = $("adminDepartment").value;
+  await request(`/api/admin/departments/${department}`, "PUT", { admins: emails($("departmentAdmins").value) });
+  await loadAdmin(); $("adminDepartment").value = department; updateAdminPrograms();
+  say("Department administrators updated.", "ok");
+}));
 
-    say("Upload complete. Starting an isolated scan container…");
-    await postJson("/api/upload/complete", {
-      uploadId,
-      blockCount,
-      contentType: file.type
-    });
-
-    await pollStatus(uploadId);
-  } catch (err) {
-    say("Upload failed: " + err.message, "bad");
-  } finally {
-    el.dept.disabled = false;
-    el.file.disabled = false;
-    refreshButton();
+async function putBlock(id, index, chunk) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(`${API}/api/upload/block?id=${id}&index=${index}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" }, body: chunk
+    }).catch(() => null);
+    if (response?.ok) return;
+    if (response && response.status < 500) throw new Error((await response.json()).error);
+    if (attempt === 3) throw new Error("A file chunk could not be uploaded. Please retry.");
+    await delay(500 * 2 ** attempt);
   }
-});
+}
+async function poll(id) {
+  const until = Date.now() + 60 * 60 * 1000;
+  while (Date.now() < until && token) {
+    await delay(5000);
+    const state = await request(`/api/status?id=${id}`);
+    const terminal = ["clean", "infected", "error", "expired", "defender_error"];
+    say(state.message, state.state === "clean" ? "ok" : terminal.includes(state.state) ? "bad" : "");
+    if (terminal.includes(state.state)) return;
+  }
+  say("Scanning is still pending. Staff retrieval remains blocked until both scanners confirm clean.");
+}
+$("upload").addEventListener("click", guarded(async () => {
+  const file = $("file").files[0];
+  if (!file || busy) return;
+  if (file.size < 1 || file.size > catalog.maxScanBytes) throw new Error("Choose a nonempty file smaller than 2 GiB.");
+  busy = true; refreshButton(); show("progressWrap", true); $("bar").style.width = "0%";
+  try {
+    const { uploadId } = await request("/api/upload/init", "POST", {
+      department: $("department").value, programId: $("program").value,
+      fileName: file.name, size: file.size, reference: $("reference").value, details: $("details").value
+    });
+    const total = Math.ceil(file.size / BLOCK_SIZE), started = Date.now();
+    let next = 0, uploaded = 0;
+    const worker = async () => {
+      while (next < total) {
+        const index = next++;
+        const chunk = file.slice(index * BLOCK_SIZE, Math.min((index + 1) * BLOCK_SIZE, file.size));
+        await putBlock(uploadId, index, chunk);
+        uploaded += chunk.size;
+        const percent = Math.round(uploaded / file.size * 100);
+        $("bar").style.width = `${percent}%`; $("pct").textContent = `${percent}% (${bytes(uploaded)} / ${bytes(file.size)})`;
+        $("rate").textContent = `${bytes(uploaded / Math.max(1, (Date.now() - started) / 1000))}/s`;
+      }
+    };
+    say("Uploading into private intake quarantine...");
+    await Promise.all(Array.from({ length: Math.min(4, total) }, worker));
+    await request("/api/upload/complete", "POST", { uploadId, blockCount: total });
+    say("ClamAV intake scan queued. Microsoft Defender will scan the department copy next.");
+    await poll(uploadId);
+  } finally { busy = false; refreshButton(); }
+}));
+async function loadSubmissions() {
+  const { submissions } = await request("/api/internal/submissions");
+  $("submissions").replaceChildren();
+  if (!submissions.length) $("submissions").textContent = "No active submissions in your assigned programs.";
+  for (const item of submissions) {
+    const card = document.createElement("article");
+    const heading = document.createElement("h3"); heading.textContent = item.fileName;
+    const description = document.createElement("p");
+    const department = catalog.departments.find(d => d.id === item.department);
+    const program = department?.programs.find(p => p.id === item.programId);
+    description.textContent = `${department?.name || item.department} / ${program?.name || item.programId} | ${item.state} | Expires ${new Date(item.expiresUtc).toLocaleString()}`;
+    const details = document.createElement("p"); details.textContent = `Reference: ${item.reference || "-"}\n${item.details || ""}`;
+    card.append(heading, description, details);
+    const button = document.createElement("button"); button.textContent = "Download & delete stored file"; button.disabled = item.state !== "clean";
+    button.addEventListener("click", guarded(async () => {
+      if (!window.confirm("Download this file? The server copy will be deleted after the response completes.")) return;
+      button.disabled = true;
+      try {
+        let target;
+        if (window.showSaveFilePicker) {
+          target = await window.showSaveFilePicker({ suggestedName: item.fileName });
+        } else if (item.size > 64 * 1024 * 1024) {
+          throw new Error("Use Edge or Chrome for streaming downloads of files over 64 MiB.");
+        }
+        const response = await fetch(`${API}/api/internal/download/${item.uploadId}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new Error((await response.json()).error);
+        if (target) {
+          const writer = await target.createWritable();
+          await response.body.pipeTo(writer);
+        } else {
+          const url = URL.createObjectURL(await response.blob());
+          const link = document.createElement("a"); link.href = url; link.download = item.fileName; link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        }
+        say("Download completed. The server copy is being deleted.", "ok");
+        await delay(1000); await loadSubmissions();
+      } finally { button.disabled = false; }
+    }));
+    card.append(button); $("submissions").append(card);
+  }
+}

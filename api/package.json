@@ -1,18 +1,22 @@
 {
   "name": "fileupload-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Upload broker API: stages chunked uploads into quarantine storage over a private endpoint and launches an isolated ClamAV scan job per file.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
-    "@azure/identity": "^4.5.0",
+    "@azure/identity": "4.13.0",
     "@azure/storage-blob": "^12.26.0",
-    "express": "^4.21.2"
+    "express": "^5.3.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

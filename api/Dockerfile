@@ -1,11 +1,11 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-COPY server.js ./
+COPY server.js portal.js services.js maintenance.js ./
 
 ENV PORT=8080
 EXPOSE 8080

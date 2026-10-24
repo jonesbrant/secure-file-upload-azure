@@ -1,42 +1,69 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Secure File Intake</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css">
 </head>
-
 <body>
   <main class="card">
-    <h1>Secure File Intake</h1>
-    <p class="sub">Files are uploaded to a quarantine area, scanned in an isolated container with ClamAV, and released
-      to the department archive only if no threats are found.</p>
-
-    <label for="department">Department</label>
-    <select id="department">
-      <option value="" disabled selected>Select a department…</option>
-      <option value="sheriff">Sheriff</option>
-      <option value="public-health">Public Health</option>
-      <option value="corrections">Corrections</option>
-    </select>
-
-    <label for="file">File</label>
-    <input type="file" id="file" />
-
-    <button id="upload" disabled>Upload &amp; Scan</button>
-
-    <div id="progressWrap" class="hidden">
-      <div class="bar"><div id="bar"></div></div>
-      <div class="row"><span id="pct">0%</span><span id="rate"></span></div>
-    </div>
-
-    <div id="status" class="status hidden"></div>
+    <header><span class="eyebrow">SECURE DOCUMENT SERVICES</span><h1>Secure File Intake</h1>
+      <p class="sub">Submit documents to Sheriff, Public Health, or Corrections. Two malware checks protect every accepted file.</p></header>
+    <section id="login">
+      <h2>Register or sign in</h2>
+      <p>No password required. Your first verified login registers your email. A fresh one-time code is required at every login.</p>
+      <form id="requestForm">
+        <label for="email">Email address</label><input id="email" type="email" autocomplete="email" maxlength="254" required>
+        <button id="requestCode">Email me a code</button>
+      </form>
+      <form id="verifyForm" class="hidden">
+        <label for="code">Eight-digit code</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" maxlength="8" required>
+        <button>Verify &amp; sign in</button>
+      </form>
+    </section>
+    <section id="portal" class="hidden">
+      <div class="toolbar"><span id="signedIn"></span><button id="logout" class="secondary">Sign out</button></div>
+      <nav><button id="publicTab" class="secondary">Public submission</button><button id="staffTab" class="secondary hidden">Internal portal</button></nav>
+      <section id="publicView">
+        <h2>Submit a file</h2>
+        <label for="department">Department</label><select id="department"></select>
+        <label for="program">Program / service / area</label><select id="program"></select>
+        <p id="retention" class="sub"></p>
+        <label for="reference">Permit / ID / case number</label><input id="reference" maxlength="200">
+        <label for="details">Additional details</label><textarea id="details" rows="4" maxlength="4000"></textarea>
+        <label for="file">File</label><input type="file" id="file">
+        <p class="sub">8 MiB chunks with automatic retries. Maximum accepted file: 2 GiB minus 1 byte, so both scanners can inspect it. Empty, encrypted, or unscannable files are not released.</p>
+        <button id="upload" disabled>Upload &amp; scan</button>
+        <div id="progressWrap" class="hidden"><div class="bar"><div id="bar"></div></div>
+          <div class="row"><span id="pct">0%</span><span id="rate"></span></div></div>
+      </section>
+      <section id="staffView" class="hidden">
+        <h2>Internal portal</h2><p>Access is limited to your assigned departments and programs. A successful download deletes the stored file. Save it in an approved departmental system.</p>
+        <button id="refresh" class="secondary">Refresh submissions</button><div id="submissions"></div>
+        <section id="adminView" class="hidden">
+          <h2>Program configuration</h2>
+          <form id="programForm">
+            <label for="adminDepartment">Department</label><select id="adminDepartment"></select>
+            <label for="editProgram">Program</label><select id="editProgram"></select>
+            <label for="programName">Program / category name</label><input id="programName" maxlength="100" required>
+            <label for="retentionDays">Retention days (1-365)</label><input id="retentionDays" type="number" min="1" max="365" value="7" required>
+            <label for="recipients">Notification recipients (one email per line)</label><textarea id="recipients" rows="3" required></textarea>
+            <p class="sub">Recipients can sign in and retrieve files for this program, but cannot change configuration. Retention is captured when the upload starts.</p>
+            <label><input id="active" type="checkbox" checked> Accept new submissions</label>
+            <button>Save program</button>
+          </form>
+          <form id="delegateForm" class="hidden">
+            <h2>Department administrators</h2><p class="sub">Portal administrators can delegate configuration access for the department selected above.</p>
+            <label for="departmentAdmins">Administrator emails (one per line)</label><textarea id="departmentAdmins" rows="3"></textarea>
+            <button class="secondary">Save department administrators</button>
+          </form>
+        </section>
+      </section>
+    </section>
+    <div id="status" class="status hidden" role="status" aria-live="polite"></div>
+    <footer>Encrypted transport &bull; Private storage &bull; ClamAV intake gate &bull; Microsoft Defender at-rest gate</footer>
   </main>
-
-  <script src="config.js"></script>
-  <script src="app.js"></script>
+  <script src="config.js"></script><script src="app.js"></script>
 </body>
-
 </html>

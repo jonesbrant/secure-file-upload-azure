@@ -1,2 +1,2 @@
-// Placeholder. DEPLOY.md overwrites this with your broker's URL before deploying the frontend.
+// Placeholder. The deployment script configures a temporary copy, not this file.
 window.APP_CONFIG = { apiBase: "https://REPLACE-WITH-YOUR-BROKER-FQDN" };

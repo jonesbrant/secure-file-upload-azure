@@ -1,7 +1,7 @@
 {
   "rules": [
     {
-      "enabled": true,
+      "enabled": false,
       "name": "purge-quarantine",
       "type": "Lifecycle",
       "definition": {
@@ -17,7 +17,7 @@
       }
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "purge-infected-and-status",
       "type": "Lifecycle",
       "definition": {
