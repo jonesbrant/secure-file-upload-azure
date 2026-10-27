@@ -10,6 +10,8 @@ scanning and Microsoft Defender for Storage** before authorised retrieval.
 Open [the self-contained architecture HTML](docs/architecture.html) for security
 details. See [the explainer transcript](docs/explainer-transcript.md) and
 [DEPLOY.md](DEPLOY.md) to deploy into **your own Azure environment**.
+The [customer PowerPoint deck](docs/customer-architecture.pptx) includes editable
+workflow slides, the full architecture diagram, and presenter notes.
 No WAF or Application Gateway is created.
 
 ## Workflow
@@ -90,7 +92,7 @@ quota availability, and plan migration before that date. See
 | `api\maintenance.js` | Retention cleanup, notification retry and expired-auth cleanup |
 | `scanner\` | ClamAV worker, freshly updated signatures at image build |
 | `scripts\upgrade.ps1` | Repeatable upgrade and deployment; generates secrets in the target environment |
-| `scripts\build_media.py` | Official-icon architecture, locally narrated video and captions |
+| `scripts\build_media.py` | Official-icon architecture, Azure neural-narrated video, captions and PowerPoint |
 | `test-upload.ps1` | Interactive email-OTP CLI smoke test |
 
 ```powershell
@@ -116,19 +118,31 @@ authentication bypass endpoint.
 Express. JSON decompression is disabled and a regression test verifies rejection;
 the report is **not** represented as clean. Reassess upstream patches regularly.
 
-Build the customer media locally on Windows (no paid media service):
+Build the customer media on Windows with Azure Speech neural narration:
 
 ```powershell
-# Requires an installed Edge browser and Windows System.Speech.
-python -m pip install Pillow playwright imageio-ffmpeg
-python .\scripts\build_media.py --output "$HOME\Downloads"
+# Requires Edge, an Azure AI/Speech resource with a custom subdomain,
+# and an Azure CLI login authorised for Speech synthesis.
+python -m pip install Pillow playwright imageio-ffmpeg python-pptx
+python .\scripts\build_media.py --output "$HOME\Downloads" `
+  --speech-resource-group "<your-speech-resource-group>" `
+  --speech-resource "<your-speech-resource>" `
+  --voice en-US-AvaMultilingualNeural --rate 18
 ```
+
+The build uses Entra authentication (no saved Speech keys), synthesizes all eight
+chapters with Ava's neural voice at +18% speaking rate, regenerates captions,
+and decodes the complete MP4 to validate it. Azure Speech synthesis is metered;
+only the customer-safe architecture narration is sent, not uploaded documents.
+The output also includes an editable 11-slide PowerPoint with official icons,
+the complete architecture diagram, and presenter notes. Speech is a media-build
+dependency, not a new service in the deployed upload application's runtime.
 
 Azure service icon SVGs are from
 [Microsoft's official architecture icon collection](https://learn.microsoft.com/en-us/azure/architecture/icons/),
 used as service illustrations without modification. HTML embeds them for
 offline sharing. The customer MP4 is delivered separately rather than storing
-large media in Git history.
+large media in Git history. Generated customer decks are delivered with the MP4.
 
 ## API
 

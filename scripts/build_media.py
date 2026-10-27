@@ -1,6 +1,6 @@
-"""Build the customer architecture and narrated MP4 locally, without cloud AI costs.
+"""Build customer architecture, an Azure neural-narrated MP4, and PowerPoint.
 
-Requires Pillow, playwright, imageio-ffmpeg, Microsoft Edge, and Windows System.Speech.
+Requires Pillow, playwright, imageio-ffmpeg, python-pptx, Edge, and Azure CLI.
 """
 
 import argparse
@@ -10,6 +10,9 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import wave
 
 import imageio_ffmpeg
@@ -165,12 +168,122 @@ def vtt_time(seconds):
     return f"{milliseconds // 3600000:02}:{milliseconds // 60000 % 60:02}:{milliseconds // 1000 % 60:02}.{milliseconds % 1000:03}"
 
 
-def build(output):
+def azure_speech(resource_group, resource, voice, rate):
+    def az(*args):
+        return subprocess.check_output(["az", *args], shell=True, text=True).strip()
+
+    account = json.loads(az("cognitiveservices", "account", "show", "-g", resource_group,
+                            "-n", resource, "-o", "json"))
+    token = az("account", "get-access-token", "--resource", "https://cognitiveservices.azure.com/",
+               "--query", "accessToken", "-o", "tsv")
+    endpoint = account["properties"]["endpoint"].rstrip("/") + "/tts/cognitiveservices/v1"
+    authorization = "Bearer aad#" + account["id"] + "#" + token
+
+    def synthesize(narration, destination):
+        ssml = (f'<speak version="1.0" xml:lang="en-US"><voice name="{html.escape(voice, quote=True)}">'
+                f'<prosody rate="+{rate}%">{html.escape(narration)}</prosody></voice></speak>')
+        request = urllib.request.Request(endpoint, data=ssml.encode("utf-8"), headers={
+            "Authorization": authorization, "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "riff-24khz-16bit-mono-pcm",
+            "User-Agent": "SecureFileIntake-CustomerMedia"})
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    destination.write_bytes(response.read())
+                return
+            except urllib.error.HTTPError as error:
+                if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    raise RuntimeError(f"Azure Speech returned HTTP {error.code}.") from None
+                time.sleep(2 ** (attempt + 1))
+    return synthesize
+
+
+def build_deck(output, images):
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches, Pt
+
+    deck = Presentation()
+    deck.slide_width, deck.slide_height = Inches(13.333), Inches(7.5)
+    dark, muted, accent = "081D33", "BED5E8", "76CAFF"
+
+    def text(slide, value, x, y, w, h, size=20, color="F5F9FF", bold=False):
+        box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+        frame = box.text_frame
+        frame.word_wrap = True
+        for index, line in enumerate(value.split("\n")):
+            p = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+            p.text = line
+            p.font.name, p.font.size = "Aptos", Pt(size)
+            p.font.bold, p.font.color.rgb = bold, RGBColor.from_string(color)
+            p.space_after = Pt(10)
+        return box
+
+    def slide(title, subtitle=""):
+        s = deck.slides.add_slide(deck.slide_layouts[6])
+        s.background.fill.solid()
+        s.background.fill.fore_color.rgb = RGBColor.from_string(dark)
+        text(s, "SECURE FILE INTAKE / CUSTOMER ARCHITECTURE", .5, .2, 12.3, .35, 11, accent, True)
+        text(s, title, .5, .75, 12.3, 1, 30, bold=True)
+        if subtitle:
+            text(s, subtitle, .5, 1.65, 12.3, .7, 17, muted)
+        text(s, "SHERIFF  /  PUBLIC HEALTH  /  CORRECTIONS", .5, 7.08, 11, .25, 10, muted)
+        text(s, f"{len(deck.slides):02d}", 12.2, 7.03, .6, .35, 12, accent)
+        return s
+
+    s = slide("Secure document intake on Azure", "A customer walkthrough of the user journey, architecture, and security boundaries")
+    text(s, "Verify the sender.\nScan twice before release.\nRetrieve securely, then delete.", .75, 2.75, 9.5, 2.8, 32, bold=True)
+    text(s, "No WAF or Application Gateway. Consumption-based compute and private file storage.", .75, 6, 11.8, .7, 19, accent)
+    s.notes_slide.notes_text_frame.text = "Customer architecture overview. Malware scanning reduces risk; it is not a guarantee or a compliance certification."
+
+    s = slide("Architecture at a glance", "Official Azure service icons | Full end-to-end diagram")
+    s.shapes.add_picture(str(DOCS / "architecture-diagram.png"), Inches(.55), Inches(2.25), height=Inches(4.65))
+    text(s, "1  Verify email and authorise\n2  Stage into private quarantine\n3  ClamAV intake scan\n4  Defender at-rest scan\n5  Notify and retrieve\n6  Delete on retrieval or expiry",
+         6.7, 2.55, 6, 3.8, 21)
+    text(s, "The full-resolution PNG and HTML are supplied separately for detailed inspection.", 6.7, 6.1, 5.8, .75, 16, muted)
+    s.notes_slide.notes_text_frame.text = "Use the supplied full-resolution architecture PNG/HTML to inspect small labels. The following slides expand each part of this diagram."
+
+    for title, subtitle, cards, narration in SCENES:
+        s = slide(title, subtitle)
+        for index, (image, name, detail) in enumerate(cards):
+            x = .5 + index * 4.18
+            panel = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(2.6), Inches(4), Inches(3.9))
+            panel.fill.solid()
+            panel.fill.fore_color.rgb = RGBColor.from_string("112E47")
+            panel.line.color.rgb = RGBColor.from_string("2E5573")
+            s.shapes.add_picture(str(images / f"{image}.png"), Inches(x + .25), Inches(2.88), width=Inches(.67))
+            text(s, name, x + .25, 3.8, 3.5, .85, 23, bold=True)
+            text(s, detail, x + .25, 4.75, 3.5, 1.5, 20, muted)
+        s.notes_slide.notes_text_frame.text = narration
+
+    s = slide("Operating decisions and boundaries", "Keep the security controls explicit as the customer scales")
+    text(s, "Accepted size: 2 GiB minus 1 byte; encrypted or unscannable files stay blocked.\n"
+         "At expiry, access stops immediately; hourly physical cleanup may lag up to one hour.\n"
+         "A completed server response triggers deletion; it cannot prove the user saved a local copy.\n"
+         "Department isolation is application-enforced using a shared managed identity.\n"
+         "Budget Defender scan volume; reaching its cap blocks release rather than bypassing scans.\n"
+         "Plan replacement of ACS Email before September 30, 2028.", .65, 2.55, 12, 4.25, 20, muted)
+    s.notes_slide.notes_text_frame.text = (
+        "Production decisions: review staff MFA, identity separation, records retention, monitoring, scan budget and email lifecycle. "
+        "Soft delete and versioning must be disabled for the documented physical deletion semantics. "
+        "Sources and detailed controls are in the accompanying architecture HTML and repository deployment guide.")
+    destination = output / "secure-file-upload-architecture.pptx"
+    deck.save(destination)
+    # Verify the package, embedded diagram, notes, and slide count after saving.
+    verified = Presentation(destination)
+    assert len(verified.slides) == len(SCENES) + 3
+    assert all(s.has_notes_slide for s in verified.slides)
+    print(f"PowerPoint: {destination} ({len(verified.slides)} slides)", flush=True)
+
+
+def build(output, resource_group, resource, voice, rate):
     output.mkdir(parents=True, exist_ok=True)
     architecture()
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     captions = ["WEBVTT", ""]
     manifest = []
+    synthesize = azure_speech(resource_group, resource, voice, rate)
     with tempfile.TemporaryDirectory(prefix="fileupload-media-") as temp:
         temp = Path(temp)
         with sync_playwright() as playwright:
@@ -182,28 +295,20 @@ def build(output):
             for index, (title, subtitle, cards, narration) in enumerate(SCENES):
                 page.set_content(scene_html(index, title, subtitle, cards))
                 page.screenshot(path=str(temp / f"scene-{index}.png"))
+            page.set_viewport_size({"width": 160, "height": 160})
+            for name in {card[0] for scene in SCENES for card in scene[2]}:
+                page.set_content(f'<style>body{{margin:0}}</style><img width="160" height="160" src="{icon(name)}">')
+                page.screenshot(path=str(temp / f"{name}.png"), omit_background=True)
             browser.close()
-        speech = """param([string]$InputPath,[string]$OutputPath)
-Add-Type -AssemblyName System.Speech
-$s = [System.Speech.Synthesis.SpeechSynthesizer]::new()
-$s.SelectVoice('Microsoft Zira Desktop')
-$s.Rate = 0
-$s.SetOutputToWaveFile($OutputPath)
-$s.Speak([IO.File]::ReadAllText($InputPath))
-$s.Dispose()
-"""
-        speech_path = temp / "speak.ps1"
-        speech_path.write_text(speech, encoding="utf-8")
+        build_deck(output, temp)
         elapsed = 0
         for index, (title, subtitle, cards, narration) in enumerate(SCENES):
-            text = temp / f"scene-{index}.txt"
             wav = temp / f"scene-{index}.wav"
             mp4 = temp / f"scene-{index}.mp4"
-            text.write_text(narration, encoding="utf-8")
-            subprocess.run(["powershell.exe", "-NoProfile", "-File", str(speech_path),
-                            "-InputPath", str(text), "-OutputPath", str(wav)], check=True)
+            print(f"Synthesizing chapter {index + 1}/{len(SCENES)} with {voice} at +{rate}%", flush=True)
+            synthesize(narration, wav)
             with wave.open(str(wav), "rb") as audio:
-                duration = audio.getnframes() / audio.getframerate() + 1.3
+                duration = audio.getnframes() / audio.getframerate() + .6
             subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-loop", "1",
                             "-i", str(temp / f"scene-{index}.png"), "-i", str(wav),
                             "-t", str(duration), "-vf", "scale=1920:1080,format=yuv420p",
@@ -215,7 +320,7 @@ $s.Dispose()
             total_words = sum(len(s.split()) for s in sentences)
             cursor = elapsed
             for sentence in sentences:
-                end = cursor + (duration - 1.3) * len(sentence.split()) / total_words
+                end = cursor + (duration - .6) * len(sentence.split()) / total_words
                 captions.extend([f"{vtt_time(cursor)} --> {vtt_time(end)}", sentence, ""])
                 cursor = end
             manifest.append({"chapter": index + 1, "title": title, "startSeconds": round(elapsed, 2),
@@ -238,14 +343,20 @@ $s.Dispose()
 <title>Secure File Intake Architecture Walkthrough</title><style>body{background:#081d33;color:white;font:20px 'Segoe UI';margin:40px}video{width:min(1400px,100%)}a{color:#8bd3ff}</style>
 <h1>Secure File Intake - architecture walkthrough</h1><video controls preload="metadata" src="secure-file-upload-explainer.mp4">
 <track kind="captions" src="secure-file-upload-explainer.vtt" srclang="en" label="English" default></video>
-<p>Locally generated narration; no customer data or cloud AI services used. If local-file captions are blocked by your browser, serve this folder over localhost or use a video player that supports WebVTT.</p></html>""", encoding="utf-8")
+<p>Azure Speech neural narration with a faster speaking pace. Only the architecture narration is sent for synthesis; no uploaded customer documents are used. If local-file captions are blocked by your browser, serve this folder over localhost or use a video player that supports WebVTT.</p></html>""", encoding="utf-8")
     import shutil
     shutil.copy2(DOCS / "architecture.html", output / "secure-file-upload-architecture.html")
     shutil.copy2(DOCS / "architecture-diagram.png", output / "secure-file-upload-architecture.png")
-    print(json.dumps({"video": str(destination), "durationSeconds": round(elapsed, 1), "chapters": len(SCENES)}, indent=2))
+    print(json.dumps({"video": str(destination), "durationSeconds": round(elapsed, 1), "chapters": len(SCENES),
+                      "voice": voice, "speakingRatePercent": rate}, indent=2))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path.home() / "Downloads")
-    build(parser.parse_args().output)
+    parser.add_argument("--speech-resource-group", required=True)
+    parser.add_argument("--speech-resource", required=True)
+    parser.add_argument("--voice", default="en-US-AvaMultilingualNeural")
+    parser.add_argument("--rate", type=int, default=18, choices=range(0, 51), metavar="0..50")
+    args = parser.parse_args()
+    build(args.output, args.speech_resource_group, args.speech_resource, args.voice, args.rate)
